@@ -1,0 +1,56 @@
+.env
+node_modules/
+dist/
+*.log
+.DS_Store
+
+# Repository safety
+.env.*
+.envrc
+.direnv/
+.npmrc
+.pypirc
+*.pem
+*.key
+*.p12
+*.pfx
+*credentials*.json
+*service-account*.json
+id_rsa*
+id_ed25519*
+
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build output and caches
+build/
+**/build/
+dist/
+**/dist/
+.next/
+**/.next/
+out/
+**/out/
+coverage/
+**/coverage/
+.cache/
+**/.cache/
+.turbo/
+**/.turbo/
+*.tsbuildinfo
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local runtime data
+*.sqlite
+*.sqlite3
+*.db
+logs/
+**/logs/
+uploads/
+**/uploads/
+tmp/
+**/tmp/
