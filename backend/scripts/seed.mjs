@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { amount as parseAmount } from '../recovery-domain.mjs';
 import bcrypt from 'bcryptjs';
 import pg from 'pg';
 
@@ -25,17 +26,17 @@ function valuesFor(feature,index){
 
 try{
   const hash=await bcrypt.hash(password,10);
-  for(const [email,name,role] of users) await pool.query(`INSERT INTO app_users(email,password_hash,name,role) VALUES($1,$2,$3,$4) ON CONFLICT(email) DO UPDATE SET password_hash=excluded.password_hash,name=excluded.name,role=excluded.role`,[email,hash,name,role]);
+  for(const [email,name,role] of users) await pool.query(`INSERT INTO app_users(email,password_hash,name,role) VALUES($1,$2,$3,$4) ON CONFLICT(email) DO NOTHING`,[email,hash,name,role]);
   for(const [featureIndex,feature] of config.features.entries()){
     for(let index=1;index<=15;index+=1){
       const reference=`${feature.code}-${String(index).padStart(3,'0')}`;
-      const payload=valuesFor(feature,index);
-      const amount=Number(payload[feature.amountField]||feature.baseAmount||((featureIndex+1)*17500+index*2100));
-      const risk=risks[(index+featureIndex)%risks.length];
+      const payload={...valuesFor(feature,index),__example:true,__version:1};
+      const amount=(feature.amountField && payload[feature.amountField] !== undefined ? parseAmount(payload[feature.amountField])/100 : 0);
+      const risk='Not assessed';
       const status=statuses[(index+featureIndex)%statuses.length];
-      const title=`${feature.title} · ${feature.seedSubjects[(index-1)%feature.seedSubjects.length]}`;
+      const title=`EXAMPLE · ${feature.title} · ${feature.seedSubjects[(index-1)%feature.seedSubjects.length]}`;
       const due=new Date(Date.UTC(2026,7,1+((index*3+featureIndex)%85))).toISOString().slice(0,10);
-      await pool.query(`INSERT INTO feature_records(feature_id,reference,title,status,owner,risk,due_date,amount,payload) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(reference) DO UPDATE SET title=excluded.title,status=excluded.status,owner=excluded.owner,risk=excluded.risk,due_date=excluded.due_date,amount=excluded.amount,payload=excluded.payload,updated_at=now()`,[feature.id,reference,title,status,owners[(index+featureIndex)%owners.length],risk,due,amount,payload]);
+      await pool.query(`INSERT INTO feature_records(feature_id,reference,title,status,owner,risk,due_date,amount,payload) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(reference) DO NOTHING`,[feature.id,reference,title,status,owners[(index+featureIndex)%owners.length],risk,due,amount,payload]);
     }
   }
   const count=(await pool.query('SELECT count(*)::int AS count FROM feature_records')).rows[0].count;
