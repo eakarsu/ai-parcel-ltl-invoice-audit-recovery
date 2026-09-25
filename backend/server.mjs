@@ -36,6 +36,9 @@ async function auth(req,res,next){
  }catch(error){if(error.name==='JsonWebTokenError'||error.name==='TokenExpiredError'||error.name==='NotBeforeError')return res.status(401).json({error:'Session expired. Sign in again.'});next(error);}
 }
 
+import { mountStatementRoutes } from './statement-routes.mjs';
+mountStatementRoutes(app, { pool, auth, audit, featureById });
+
 app.get('/api/health',async(_req,res)=>{try{await pool.query('SELECT 1');res.json({status:'ok',id:config.id,title:config.title,database:'postgresql',ai:aiStatus()});}catch{res.status(503).json({status:'error',error:'PostgreSQL unavailable'});}});
 app.get('/api/auth/demo-credentials',async(req,res)=>{if(!localRequest(req))return res.status(404).json({error:'Credential fill is available only on this computer'});const password=process.env.DEMO_PASSWORD||'LocalDemo!2026';const rows=(await pool.query("SELECT email,name,role FROM app_users ORDER BY CASE role WHEN 'admin' THEN 1 WHEN 'operator' THEN 2 ELSE 3 END")).rows;res.json({email:rows[0]?.email,password,accounts:rows.map(x=>({...x,password}))});});
 app.post('/api/auth/login',async(req,res)=>{const email=String(req.body.email||'').trim().toLowerCase();const row=(await pool.query('SELECT * FROM app_users WHERE lower(email)=$1',[email])).rows[0];if(!row||!await bcrypt.compare(String(req.body.password||''),row.password_hash))return res.status(401).json({error:'Invalid credentials'});const user={id:row.id,email:row.email,name:row.name,role:row.role};res.json({token:jwt.sign(user,secret,{expiresIn:'12h',algorithm:'HS256',audience:config.id,issuer:config.id}),user});});
