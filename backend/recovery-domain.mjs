@@ -23,6 +23,26 @@ export function validateInputs(feature,input,required=false){
  }
  return output;
 }
+/** The recovery rule a capability reconciles against: statement actual vs rule-expected. */
+export function recoveryRuleFor(config,feature){
+ const configured=config?.calculation;
+ if(configured?.actualKey&&configured?.expectedKey)return{actualKey:configured.actualKey,expectedKey:configured.expectedKey,direction:configured.direction==='expected-minus-actual'?'expected-minus-actual':'actual-minus-expected'};
+ if(feature?.fields?.some(field=>field.key==='allowedAmount'))return{actualKey:'billedAmount',expectedKey:'allowedAmount',direction:'actual-minus-expected'};
+ return null;
+}
+/** Open (unconfirmed) recovery potential from non-example records still in the workflow. */
+export function openRecoveryPotential(config,feature,records){
+ const rule=recoveryRuleFor(config,feature);if(!rule)return 0;let total=0;
+ for(const record of records??[]){
+  if(record.payload?.__example)continue;
+  if(['Approved','Closed'].includes(record.status))continue;
+  const actual=Number(record.payload?.[rule.actualKey]),expected=Number(record.payload?.[rule.expectedKey]);
+  if(!Number.isFinite(actual)||!Number.isFinite(expected))continue;
+  const signed=rule.direction==='expected-minus-actual'?expected-actual:actual-expected;
+  if(signed>0)total+=signed;
+ }
+ return Number(total.toFixed(2));
+}
 const money=(cents,currency)=>new Intl.NumberFormat('en-US',{style:'currency',currency}).format(cents/100);
 function report(feature,metrics,summary,extra={}){return {headline:`${feature.title} — input reconciliation`,executiveSummary:summary,risk:'Not assessed',confidence:null,provider:'Domain engine',model:'Exact input reconciliation v2',metrics,sections:[{title:'Calculation scope',detail:'Calculated only from entered amounts. Source accuracy, entitlement and realized recovery have not been independently verified.'}],actions:['Review the source amounts and governing agreement.','Record evidence and an independent review before closure.'],disclaimer:'An arithmetic variance is not a confirmed refund or a compliance determination.',...extra};}
 export function calculate(config,feature,raw){

@@ -1,11 +1,11 @@
 /**
- * Statement ingestion + confirmed-credit reconciliation.
+ * Statement ingestion + rule-based recovery reconciliation.
  *
  * Closes the launch condition shared by the recovery apps: *"real statement
- * ingestion and removal of assumed recovery"*. Until now the only way to get
- * figures in was to type them into a form (or press a demo-fill button), so
- * every number was operator-entered and nothing tied back to a source
- * document.
+ * ingestion and removal of assumed recovery"*. A statement line is the actual
+ * (billed/charged/reimbursed) figure from the source document; the expected
+ * figure comes from the capability's configured recovery rule. Nothing is
+ * confirmed from a typed amount alone.
  *
  * What this adds:
  *   - parse an uploaded statement (CSV or JSON rows) into records
@@ -13,8 +13,9 @@
  *     checksum — so a figure can always be traced to the line it came from
  *   - idempotent on the statement checksum: re-uploading a file cannot
  *     double-count
- *   - reconcile ingested rows against entered amounts and report **confirmed**
- *     credits separately from **assumed** ones
+ *   - reconcile ingested rows against the configured recovery rule and report
+ *     **confirmed** recovery separately from **assumed** entries, ignoring
+ *     seeded `__example` records and classifying credit memos
  *
  * Deterministic: no model calls, no invented figures.
  */
@@ -135,22 +136,34 @@ export function parseStatement(text, format) {
 }
 
 /**
- * Reconcile ingested statement lines against operator-entered records.
+ * Reconcile ingested statement lines against feature records using the
+ * capability's configured recovery rule.
  *
- * This is the "removal of assumed recovery" step: a difference is only
- * reported as **confirmed** when a source line supports it. Anything matched
- * purely from typed values is labelled assumed.
+ * The statement line is the actual (billed/charged/reimbursed) amount from the
+ * source document. The rule's expected key is the contract/policy-supported
+ * amount carried by the record. A recovery is confirmed only when the line
+ * supports a positive variance in the configured direction:
+ *   - `actual-minus-expected`  → billed/charged exceeds what is supported
+ *   - `expected-minus-actual`  → supported amount exceeds what was reimbursed
+ *
+ * Seeded `__example` records are never reconciled into confirmed totals, and a
+ * negative statement amount is classified as a credit line rather than assumed
+ * recovery. Entries without a rule or without the expected field stay assumed.
  */
-export function reconcile(statementRows, records) {
+export function reconcile(statementRows, records, rule) {
   const byRef = new Map();
   for (const rec of records ?? []) {
     const key = String(rec.reference ?? '').trim();
-    if (!key) continue;
+    if (!key || byRef.has(key)) continue;
     byRef.set(key, rec);
   }
 
   const confirmed = [];
+  const matched = [];
   const assumed = [];
+  const credits = [];
+  const noRecovery = [];
+  const ignored = [];
   const unmatched = [];
 
   // One statement line per reference: a repeated reference is a duplicate line
@@ -158,72 +171,106 @@ export function reconcile(statementRows, records) {
   const seen = new Set();
 
   for (const row of statementRows) {
-    const rec = byRef.get(row.reference);
-    if (!rec) {
-      unmatched.push({ reference: row.reference, statementAmount: row.amount, line: row.line });
-      continue;
-    }
-    if (seen.has(row.reference)) {
-      unmatched.push({
-        reference: row.reference,
-        statementAmount: row.amount,
-        line: row.line,
-        status: 'duplicate_line',
-        reason: 'Reference already reconciled from an earlier line in this statement',
-      });
-      continue;
-    }
-    seen.add(row.reference);
-    const entered = Number(rec.amount ?? 0);
-    const delta = Number((row.amount - entered).toFixed(2));
     const entry = {
       reference: row.reference,
       line: row.line,
       statementAmount: row.amount,
-      enteredAmount: entered,
-      delta,
       sourceChecksum: row.checksum ?? null,
       provenance: `${row.sourceFile ?? 'statement'} line ${row.line}`,
     };
-    if (delta === 0) confirmed.push({ ...entry, status: 'matched' });
-    else if (delta > 0) confirmed.push({ ...entry, status: 'overcharge_supported' });
-    else assumed.push({ ...entry, status: 'entered_exceeds_statement' });
+
+    const rec = byRef.get(row.reference);
+    if (!rec) {
+      unmatched.push({ ...entry, status: 'unmatched', reason: 'No record in this workspace matches the statement reference' });
+      continue;
+    }
+    if (seen.has(row.reference)) {
+      unmatched.push({ ...entry, status: 'duplicate_line', reason: 'Reference already reconciled from an earlier line in this statement' });
+      continue;
+    }
+    seen.add(row.reference);
+
+    if (rec.payload?.__example) {
+      ignored.push({ ...entry, status: 'seeded_example_ignored', recordReference: rec.reference, reason: 'Seeded example record; it cannot support confirmed recovery' });
+      continue;
+    }
+    if (row.amount < 0) {
+      credits.push({ ...entry, status: 'credit_line', recordReference: rec.reference, reason: 'Negative statement amount is a credit memo, not a recovery' });
+      continue;
+    }
+    if (!rule) {
+      assumed.push({ ...entry, status: 'assumed_no_rule', recordReference: rec.reference, reason: 'This capability has no configured recovery rule, so no source-supported recovery can be confirmed' });
+      continue;
+    }
+
+    const expected = Number(rec.payload?.[rule.expectedKey]);
+    if (!Number.isFinite(expected)) {
+      assumed.push({
+        ...entry,
+        status: 'assumed_missing_expected_amount',
+        recordReference: rec.reference,
+        expectedKey: rule.expectedKey,
+        reason: `The record does not carry ${rule.expectedKey}; recovery stays assumed`,
+      });
+      continue;
+    }
+
+    const signed = Number((rule.direction === 'expected-minus-actual' ? expected - row.amount : row.amount - expected).toFixed(2));
+    const assessed = {
+      ...entry,
+      recordReference: rec.reference,
+      expectedKey: rule.expectedKey,
+      expectedAmount: expected,
+      signedRecovery: signed,
+      rule: { actualKey: rule.actualKey, expectedKey: rule.expectedKey, direction: rule.direction },
+    };
+
+    if (signed > 0) confirmed.push({ ...assessed, status: 'recovery_supported' });
+    else if (signed === 0) matched.push({ ...assessed, status: 'matched' });
+    else noRecovery.push({ ...assessed, status: 'no_recovery_supported', reason: 'The statement line supports no recovery in the configured direction' });
   }
 
-  const supportedRecovery = confirmed
-    .filter((c) => c.status === 'overcharge_supported')
-    .reduce((s, c) => s + c.delta, 0);
+  const confirmedRecovery = confirmed.reduce((sum, item) => sum + item.signedRecovery, 0);
+  const creditTotal = credits.reduce((sum, item) => sum + item.statementAmount, 0);
 
   return {
     confirmed,
+    matched,
     assumed,
+    credits,
+    noRecovery,
+    ignored,
     unmatched,
+    rule: rule ?? null,
     summary: {
       statementRows: statementRows.length,
-      // matched = rows that found a record, whether the figure was supported
-      // (confirmed) or the entered value exceeded the statement (assumed).
-      matched: confirmed.length + assumed.length,
+      matched: confirmed.length + matched.length + assumed.length + credits.length + noRecovery.length + ignored.length,
       unmatched: unmatched.length,
-      /** Only this figure is supported by a source document. */
-      confirmedRecoveryCents: Math.round(supportedRecovery * 100),
-      confirmedRecovery: Number(supportedRecovery.toFixed(2)),
+      confirmedEntries: confirmed.length,
+      /** Only this figure is supported by a source line and the configured rule. */
+      confirmedRecoveryCents: Math.round(confirmedRecovery * 100),
+      confirmedRecovery: Number(confirmedRecovery.toFixed(2)),
       assumedEntries: assumed.length,
+      ignoredExamples: ignored.length,
+      creditEntries: credits.length,
+      creditTotal: Number(creditTotal.toFixed(2)),
+      noRecoveryEntries: noRecovery.length,
     },
     disclaimer:
-      'Only differences backed by a statement line are reported as confirmed recovery. ' +
-      'A variance without a source line is assumed and is not a refund.',
+      'Only variances supported by an ingested statement line and the configured recovery rule are reported as confirmed recovery. ' +
+      'Typed values, seeded examples, and credit memos never become confirmed refunds.',
   };
 }
 
 /**
  * Build the ingest result without touching the database, so callers can
- * preview before committing.
+ * preview and persist exactly the same figures.
  */
-export function ingestStatement({ text, format, sourceFile, records }) {
+export function ingestStatement({ text, format, sourceFile, records, rule }) {
   const checksum = statementChecksum(text);
   const parsed = parseStatement(text, format);
   const rows = parsed.rows.map((r) => ({ ...r, checksum, sourceFile: sourceFile ?? 'upload' }));
-  const recon = reconcile(rows, records);
+  const recon = reconcile(rows, records, rule);
 
   return {
     checksum,
@@ -239,7 +286,8 @@ export function ingestStatement({ text, format, sourceFile, records }) {
       'Amounts are read verbatim from the statement; no figures are inferred.',
       'Rows whose amount is not numeric are rejected and listed, never coerced to zero.',
       'The checksum makes ingestion idempotent: the same file re-uploaded does not create new records.',
-      'Recovery is confirmed only where a statement line supports it.',
+      'Recovery is confirmed only where a statement line and the configured recovery rule support it.',
+      'Seeded example records and negative credit lines never become confirmed recovery.',
     ],
   };
 }

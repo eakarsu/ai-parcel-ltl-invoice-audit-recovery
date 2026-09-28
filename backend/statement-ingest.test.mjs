@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import config from '../app.config.mjs';
+import { recoveryRuleFor } from './recovery-domain.mjs';
 import { ingestStatement, parseStatementCsv, statementChecksum } from './statement-ingest.mjs';
 
 const CSV = [
@@ -25,29 +27,83 @@ test('ingestion is idempotent on checksum', () => {
   assert.equal(statementChecksum(CSV), a.checksum);
 });
 
-test('recovery is confirmed only where a statement line supports it', () => {
-  const records = [
-    { reference: 'INV-001', amount: 100.0 },   // statement says 125.50 -> supported +25.50
-    { reference: 'INV-002', amount: 95.0 },    // statement says 80.00 -> entered exceeds, assumed
-  ];
-  const out = ingestStatement({ text: CSV, sourceFile: 'parcel-oct.csv', records });
-  const { summary, confirmed, assumed, unmatched } = out.reconciliation;
+// The rule differs per app (marketplace reconciles expected-minus-actual), so
+// this shared suite derives it from app.config.mjs instead of hard-coding keys.
+const ruleFeature = config.features.find((feature) => recoveryRuleFor(config, feature));
+const rule = recoveryRuleFor(config, ruleFeature);
+const recoveryLine = rule.direction === 'expected-minus-actual' ? 80 : 125.5;
+const shortfallLine = rule.direction === 'expected-minus-actual' ? 130 : 70;
 
-  assert.equal(summary.matched, 2);
-  assert.equal(summary.unmatched, 1);                 // INV-001 duplicate line 4 has no 4th record
-  assert.equal(summary.confirmedRecovery, 25.5);      // only the supported overcharge
-  assert.equal(summary.assumedEntries, 1);
-  assert.equal(confirmed.find(c => c.reference === 'INV-001').status, 'overcharge_supported');
-  assert.equal(assumed[0].status, 'entered_exceeds_statement');
-  assert.match(confirmed[0].provenance, /parcel-oct\.csv line 2/);
-  assert.ok(out.reconciliation.disclaimer.includes('not a refund'));
+test('confirms recovery only through the configured rule, and never from seeded examples or credits', () => {
+  const text = [
+    'reference,description,amount',
+    `INV-001,primary evidence,${recoveryLine}`,
+    `INV-002,secondary evidence,${shortfallLine}`,
+    `INV-003,seeded example,${recoveryLine}`,
+    'INV-004,credit memo,-15.00',
+    `INV-001,duplicate line,${recoveryLine}`,
+  ].join('\n');
+  const records = [
+    { reference: 'INV-001', amount: 100, payload: { [rule.expectedKey]: 100 } },
+    { reference: 'INV-002', amount: 100, payload: { [rule.expectedKey]: 100 } },
+    { reference: 'INV-003', amount: 100, payload: { [rule.expectedKey]: 100, __example: true } },
+    { reference: 'INV-004', amount: 100, payload: { [rule.expectedKey]: 100 } },
+  ];
+  const { reconciliation } = ingestStatement({ text, sourceFile: 'shared-domain.csv', records, rule });
+  const { summary, confirmed, ignored, credits, noRecovery, assumed, unmatched } = reconciliation;
+  const supported = rule.direction === 'expected-minus-actual' ? 20 : 25.5;
+
+  assert.equal(confirmed.length, 1);
+  assert.equal(confirmed[0].status, 'recovery_supported');
+  assert.equal(confirmed[0].recordReference, 'INV-001');
+  assert.equal(confirmed[0].signedRecovery, supported);
+  assert.equal(summary.confirmedRecovery, supported);
+  assert.match(confirmed[0].provenance, /shared-domain\.csv line 2/);
+
+  assert.equal(ignored.length, 1);
+  assert.equal(ignored[0].status, 'seeded_example_ignored');
+  assert.equal(summary.ignoredExamples, 1);
+  assert.equal(credits.length, 1);
+  assert.equal(credits[0].status, 'credit_line');
+  assert.equal(summary.creditTotal, -15);
+  assert.equal(noRecovery.length, 1);
+  assert.equal(noRecovery[0].status, 'no_recovery_supported');
+  assert.equal(assumed.length, 0);
+  assert.equal(unmatched.length, 1);
+  assert.equal(unmatched[0].status, 'duplicate_line');
+  assert.equal(summary.matched, 4);
+  assert.ok(reconciliation.disclaimer.includes('never become confirmed refunds'));
+});
+
+test('records without the expected amount or without a rule stay assumed', () => {
+  const missing = ingestStatement({
+    text: `reference,description,amount\nINV-001,x,${recoveryLine}\n`,
+    sourceFile: 'missing.csv',
+    records: [{ reference: 'INV-001', amount: 100, payload: {} }],
+    rule,
+  });
+  assert.equal(missing.reconciliation.confirmed.length, 0);
+  assert.equal(missing.reconciliation.assumed[0].status, 'assumed_missing_expected_amount');
+
+  const noRuleFeature = config.features.find((feature) => !recoveryRuleFor(config, feature));
+  if (noRuleFeature) {
+    const noRule = ingestStatement({
+      text: 'reference,description,amount\nINV-001,x,10\n',
+      sourceFile: 'norule.csv',
+      records: [{ reference: 'INV-001', amount: 5, payload: {} }],
+      rule: null,
+    });
+    assert.equal(noRule.reconciliation.confirmed.length, 0);
+    assert.equal(noRule.reconciliation.assumed[0].status, 'assumed_no_rule');
+  }
 });
 
 test('zero-variance rows are matched, not reported as recovery', () => {
   const out = ingestStatement({
-    text: 'reference,description,amount\nA,x,50\n',
-    records: [{ reference: 'A', amount: 50 }],
+    text: 'reference,description,amount\nA,x,100\n',
+    records: [{ reference: 'A', amount: 100, payload: { [rule.expectedKey]: 100 } }],
+    rule,
   });
   assert.equal(out.reconciliation.summary.confirmedRecovery, 0);
-  assert.equal(out.reconciliation.confirmed[0].status, 'matched');
+  assert.equal(out.reconciliation.matched[0].status, 'matched');
 });
