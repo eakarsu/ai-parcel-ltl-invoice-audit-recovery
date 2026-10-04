@@ -1,6 +1,6 @@
 CREATE TABLE IF NOT EXISTS statement_ingests (
   id SERIAL PRIMARY KEY,
-  checksum TEXT NOT NULL UNIQUE,
+  checksum TEXT NOT NULL,
   source_file TEXT,
   row_count INTEGER NOT NULL DEFAULT 0,
   rejected_count INTEGER NOT NULL DEFAULT 0,
@@ -8,6 +8,12 @@ CREATE TABLE IF NOT EXISTS statement_ingests (
   ingested_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 ALTER TABLE statement_ingests ADD COLUMN IF NOT EXISTS feature_id TEXT;
+ALTER TABLE statement_ingests DROP CONSTRAINT IF EXISTS statement_ingests_checksum_key;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='statement_ingests' AND column_name='account_id') THEN
+    CREATE UNIQUE INDEX IF NOT EXISTS statement_ingests_feature_checksum_idx ON statement_ingests(feature_id, checksum);
+  END IF;
+END $$;
 ALTER TABLE statement_ingests ADD COLUMN IF NOT EXISTS assumed_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE statement_ingests ADD COLUMN IF NOT EXISTS confirmed_recovery NUMERIC(16,2) NOT NULL DEFAULT 0;
 ALTER TABLE statement_ingests ADD COLUMN IF NOT EXISTS reconciliation JSONB NOT NULL DEFAULT '{}'::jsonb;

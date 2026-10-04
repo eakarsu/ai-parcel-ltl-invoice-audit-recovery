@@ -25,10 +25,37 @@ export function validateInputs(feature,input,required=false){
 }
 /** The recovery rule a capability reconciles against: statement actual vs rule-expected. */
 export function recoveryRuleFor(config,feature){
+ if(config?.id==='ai-parcel-ltl-invoice-audit-recovery'&&feature?.id==='fuel-surcharge-audit')
+  return{actualKey:'billedAmount',expectedKey:'derivedFuelSurcharge',direction:'actual-minus-expected',formula:'contract-fuel-percent-v1'};
  const configured=config?.calculation;
  if(configured?.actualKey&&configured?.expectedKey)return{actualKey:configured.actualKey,expectedKey:configured.expectedKey,direction:configured.direction==='expected-minus-actual'?'expected-minus-actual':'actual-minus-expected'};
  if(feature?.fields?.some(field=>field.key==='allowedAmount'))return{actualKey:'billedAmount',expectedKey:'allowedAmount',direction:'actual-minus-expected'};
  return null;
+}
+/** Derive expected fuel from entered signed terms; dates and reference are required. */
+export function expectedFromRule(record,rule,statementDate){
+ if(rule?.formula!=='contract-fuel-percent-v1'){
+  const rawExpected=record?.payload?.[rule?.expectedKey];
+  const expected=rawExpected==null||String(rawExpected).trim()===''?NaN:Number(rawExpected);
+  return Number.isFinite(expected)?{expected,reference:null}:{expected:null,reason:`The record does not carry ${rule?.expectedKey}`};
+ }
+ const payload=record?.payload??{};
+ const reference=String(payload.contractReference??'').trim();
+ const percent=String(payload.contractFuelPercent??'').trim();
+ const date=String(statementDate??payload.chargeDate??'');
+ const effective=String(payload.contractEffectiveDate??''),expires=String(payload.contractExpiresDate??'');
+ const validDay=s=>/^\d{4}-\d{2}-\d{2}$/.test(s)&&Number.isFinite(Date.parse(s))&&new Date(s).toISOString().slice(0,10)===s;
+ if(reference.length<5||!/^\d{1,3}(?:\.\d{1,4})?$/.test(percent)||Number(percent)>100||
+    !validDay(date)||!validDay(effective)||!validDay(expires)||date<effective||date>expires||effective>expires)
+  return{expected:null,reason:'Signed fuel terms, date window or rate-card reference are missing or do not cover this charge'};
+ try{
+  const baseCents=BigInt(amount(payload.baseFreightAmount,'Base freight amount'));
+  const [whole,fraction='']=percent.split('.');
+  const scaled=BigInt(whole)*10000n+BigInt(fraction.padEnd(4,'0'));
+  const expectedCents=(baseCents*scaled+500000n)/1000000n;
+  if(expectedCents>BigInt(Number.MAX_SAFE_INTEGER))return{expected:null,reason:'Derived fuel amount exceeds supported precision'};
+  return{expected:Number(expectedCents)/100,reference,formula:'base freight × entered contract fuel percentage',effective,expires};
+ }catch{return{expected:null,reason:'Base freight amount is missing or invalid'};}
 }
 /** Open (unconfirmed) recovery potential from non-example records still in the workflow. */
 export function openRecoveryPotential(config,feature,records){
@@ -36,7 +63,8 @@ export function openRecoveryPotential(config,feature,records){
  for(const record of records??[]){
   if(record.payload?.__example)continue;
   if(['Approved','Closed'].includes(record.status))continue;
-  const actual=Number(record.payload?.[rule.actualKey]),expected=Number(record.payload?.[rule.expectedKey]);
+  const rawActual=record.payload?.[rule.actualKey];if(rawActual==null||String(rawActual).trim()==='')continue;
+  const actual=Number(rawActual),expected=expectedFromRule(record,rule,record.payload?.chargeDate).expected;
   if(!Number.isFinite(actual)||!Number.isFinite(expected))continue;
   const signed=rule.direction==='expected-minus-actual'?expected-actual:actual-expected;
   if(signed>0)total+=signed;
@@ -47,6 +75,14 @@ const money=(cents,currency)=>new Intl.NumberFormat('en-US',{style:'currency',cu
 function report(feature,metrics,summary,extra={}){return {headline:`${feature.title} — input reconciliation`,executiveSummary:summary,risk:'Not assessed',confidence:null,provider:'Domain engine',model:'Exact input reconciliation v2',metrics,sections:[{title:'Calculation scope',detail:'Calculated only from entered amounts. Source accuracy, entitlement and realized recovery have not been independently verified.'}],actions:['Review the source amounts and governing agreement.','Record evidence and an independent review before closure.'],disclaimer:'An arithmetic variance is not a confirmed refund or a compliance determination.',...extra};}
 export function calculate(config,feature,raw){
  const input=validateInputs(feature,raw),currency=config.currency||'USD';
+ if(config.id==='ai-parcel-ltl-invoice-audit-recovery'&&feature.id==='fuel-surcharge-audit'){
+  const rule=recoveryRuleFor(config,feature),derived=expectedFromRule({payload:input},rule,input.chargeDate);
+  if(derived.expected===null)throw invalid(derived.reason);
+  const billed=amount(input.billedAmount,'Billed fuel surcharge'),expected=amount(derived.expected,'Derived fuel surcharge');
+  return report(feature,[{label:'Billed fuel surcharge',value:money(billed,currency)},{label:'Derived contract surcharge',value:money(expected,currency)},{label:'Signed variance',value:money(billed-expected,currency)}],
+   'Expected fuel is derived from the entered base freight and signed rate-card percentage within the stated date window; a reviewer must check the agreement.',
+   {contractReference:derived.reference,formula:derived.formula,expectedCents:expected,signedVarianceCents:billed-expected,potentialRecoveryCents:Math.max(0,billed-expected)});
+ }
  let rule=config.calculation;
  if(config.engine==='cam'){
   if(['pro-rata','occupancy-registry'].includes(feature.id)){

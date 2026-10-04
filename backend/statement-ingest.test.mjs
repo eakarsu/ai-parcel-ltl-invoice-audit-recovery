@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import config from '../app.config.mjs';
 import { recoveryRuleFor } from './recovery-domain.mjs';
-import { ingestStatement, parseStatementCsv, statementChecksum } from './statement-ingest.mjs';
+import { ingestStatement, parseStatementCsv, parseStatementJson, statementChecksum } from './statement-ingest.mjs';
 
 const CSV = [
   'reference,description,amount',
@@ -72,7 +72,7 @@ test('confirms recovery only through the configured rule, and never from seeded 
   assert.equal(unmatched.length, 1);
   assert.equal(unmatched[0].status, 'duplicate_line');
   assert.equal(summary.matched, 4);
-  assert.ok(reconciliation.disclaimer.includes('never become confirmed refunds'));
+  assert.ok(reconciliation.disclaimer.includes('not proof of a received refund'));
 });
 
 test('records without the expected amount or without a rule stay assumed', () => {
@@ -106,4 +106,13 @@ test('zero-variance rows are matched, not reported as recovery', () => {
   });
   assert.equal(out.reconciliation.summary.confirmedRecovery, 0);
   assert.equal(out.reconciliation.matched[0].status, 'matched');
+});
+
+test('missing, malformed, and sub-cent statement amounts cannot become evidence', () => {
+  const csv = parseStatementCsv('reference,description,amount\nA,blank,\nB,subcent,1.234\nC,valid,0.00\n');
+  assert.equal(csv.rows.length, 1);
+  assert.equal(csv.rejected.length, 2);
+  const json = parseStatementJson(JSON.stringify([{ reference: 'A', amount: null }, { reference: 'B', amount: '' }, { reference: 'C', amount: 1.234 }, { reference: 'D', amount: 0 }]));
+  assert.equal(json.rows.length, 1);
+  assert.equal(json.rejected.length, 3);
 });
