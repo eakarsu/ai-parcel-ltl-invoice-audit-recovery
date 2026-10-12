@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { RecoveryModal } from './RecoveryRecordDialog.jsx';
 
 const formatMoney = (value) => new Intl.NumberFormat('en-US', {
   style: 'currency', currency: 'USD',
@@ -97,7 +98,7 @@ export default function StatementIngest({ features, request, notify, onSaved }) 
       </form>
       {error && <p role="alert" className="error">{error}</p>}
     </section>
-    {result && <section className="panel">
+    {result && <RecoveryModal label="Imported statement evidence" busy={busy} onClose={()=>setResult(null)}><section className="panel">
       <h3>{result.sourceFile}</h3>
       <p>Checksum: <code>{result.checksum}</code>. {result.alreadyIngested ? 'Previously imported statement.' : 'New statement saved.'}</p>
       <div className="metrics">
@@ -112,7 +113,7 @@ export default function StatementIngest({ features, request, notify, onSaved }) 
         <h4>{label} ({entries.length})</h4>
         <div className="tableWrap"><table><thead><tr><th>Line</th><th>Reference</th><th>Statement amount</th><th>Expected amount</th><th>Variance</th><th>Reason</th></tr></thead><tbody>{entries.map((entry, index) => <tr key={`${entry.line}-${index}`}><td>{entry.line}</td><td>{entry.reference}</td><td>{formatMoney(entry.statementAmount)}</td><td>{entry.expectedAmount == null ? '—' : formatMoney(entry.expectedAmount)}</td><td>{entry.signedRecovery == null ? '—' : formatMoney(entry.signedRecovery)}</td><td>{entry.reason || 'Matched to the configured rule'}</td></tr>)}</tbody></table></div>
       </div>)}
-    </section>}
+    </section>{error&&<p className="error" role="alert">{error}</p>}<p className="muted">This evidence is retained. Use the existing review, version or claim-event controls for amendments.</p><div className="buttonRow"><button type="button" className="secondary" disabled title="Retained evidence cannot be overwritten">Edit</button><button type="button" className="danger" disabled title="Retained evidence cannot be deleted">Delete</button><button type="button" className="secondary" disabled={busy} onClick={()=>setResult(null)}>Cancel</button></div></RecoveryModal>}
     <section className="panel"><h3>Recent imports</h3>{history.length ? <div className="tableWrap"><table><thead><tr><th>File</th><th>Capability</th><th>Rows</th><th>Source-supported variance</th></tr></thead><tbody>{history.map(item => <tr key={item.id} onClick={() => openIngest(item.id)}><td><button type="button" className="secondary" disabled={busy}>{item.source_file}</button></td><td>{features.find(feature => feature.id === item.feature_id)?.title || item.feature_id}</td><td>{item.row_count}</td><td>{formatMoney(item.confirmed_recovery)}</td></tr>)}</tbody></table></div> : <p>No statements imported yet.</p>}</section>
   </>;
 }

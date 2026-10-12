@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { RecoveryModal } from './RecoveryRecordDialog.jsx';
 
 const money = (cents) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(Number(cents || 0) / 100);
 export default function Claims({ request, notify, user }) {
@@ -43,7 +44,7 @@ export default function Claims({ request, notify, user }) {
     <section className="panel"><h3>Customer claims</h3>
     {claims.length ? <div className="tableWrap"><table><thead><tr><th>Case</th><th>Status</th><th>Claimed variance</th><th>Statement credit evidence</th><th>Source</th></tr></thead><tbody>{claims.map(claim => <tr key={claim.id}><td><button className="secondary" disabled={busy} onClick={() => act(() => claim.id)}>{claim.record_reference}</button></td><td>{claim.status.replaceAll('_', ' ')}</td><td>{money(claim.requested_cents)}</td><td>{money(claim.credit_cents)}</td><td>{claim.source_file} #{claim.line_number}{claim.parcel_assessment_id && <><br /><small>{claim.tariff_file} #{claim.tariff_line}, v{claim.tariff_version}</small></>}</td></tr>)}</tbody></table></div> : <p>No claims opened yet.</p>}
     </section>
-    {selected && <section className="panel"><h3>Claim {selected.claim.id} · {selected.claim.record_reference}</h3>
+    {selected && <RecoveryModal label="Recovery claim" busy={busy} onClose={()=>setSelected(null)}><section className="panel"><h3>Claim {selected.claim.id} · {selected.claim.record_reference}</h3>
       <p>Status: <strong>{selected.claim.status.replaceAll('_', ' ')}</strong>. Candidate variance {money(selected.claim.requested_cents)}; linked statement credit {money(selected.claim.credit_cents)}. No paid settlement has been verified.</p>
       {selectedEvidence?.parcel_assessment_id && <p>Tariff evidence: {selectedEvidence.tariff_file} #{selectedEvidence.tariff_line}, version {selectedEvidence.tariff_version}. Exact operator-imported line: <q>{selectedEvidence.tariff_quote}</q>. Carrier authenticity remains unverified.</p>}
       {selected.events.length > 0 && <div><h4>External status evidence entered by staff</h4><ul>{selected.events.map(event => <li key={event.id}>{event.event_type} · {event.external_reference} · SHA-256 {event.evidence_hash.slice(0, 16)}… <details><summary>Copied evidence</summary><pre className="font-sans whitespace-pre-wrap">{event.evidence_text}</pre></details></li>)}</ul></div>}
@@ -55,6 +56,6 @@ export default function Claims({ request, notify, user }) {
       {['ACKNOWLEDGED', 'PARTIAL_CREDIT'].includes(selected.claim.status) && <form onSubmit={event => { event.preventDefault(); act(async () => { await request(`/api/claims/${selected.claim.id}/credits`, { method: 'POST', body: JSON.stringify({ creditLineId: Number(creditLineId), issuerReference }) }); notify('Imported credit line linked. Paid settlement remains unverified.'); setIssuerReference(''); }); }}>
         <h4>Link later imported credit line</h4><div className="formGrid"><label>Credit line<select required value={creditLineId} onChange={event => setCreditLineId(event.target.value)}><option value="">Select a credit line</option>{creditLines.map(line => <option key={line.id} value={line.id}>{line.source_file} #{line.line_number} · {money(-Math.round(Number(line.amount) * 100))} · {line.reference}</option>)}</select></label><label>Issuer credit reference<input minLength={5} maxLength={200} required value={issuerReference} onChange={event => setIssuerReference(event.target.value)}/></label></div><button className="primary" disabled={busy || !roleCanOperate || !creditLineId}>Link statement credit evidence</button><p>Import a later issuer statement with a negative credit line referencing this case. Parcel claims also require the same imported charge type. Statement credit and paid settlement remain distinct.</p>
       </form>}
-    </section>}
+    </section>{error&&<p className="error" role="alert">{error}</p>}<p className="muted">This evidence is retained. Use the existing review, version or claim-event controls for amendments.</p><div className="buttonRow"><button type="button" className="secondary" disabled title="Retained evidence cannot be overwritten">Edit</button><button type="button" className="danger" disabled title="Retained evidence cannot be deleted">Delete</button><button type="button" className="secondary" disabled={busy} onClick={()=>setSelected(null)}>Cancel</button></div></RecoveryModal>}
   </>;
 }
