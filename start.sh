@@ -8,7 +8,8 @@ export UI_HOST="${UI_HOST:-127.0.0.1}"
 export API_HOST="${API_HOST:-127.0.0.1}"
 export UI_PORT="${UI_PORT:-4553}"
 export API_PORT="${API_PORT:-5553}"
-export SESSION_SECRET="${SESSION_SECRET:-local-domain-recovery-session-change-before-production}"
+if [ -z "${SESSION_SECRET:-}" ] || [ "${#SESSION_SECRET}" -lt 32 ]; then echo "SESSION_SECRET must be set to at least 32 random characters" >&2; exit 1; fi
+export SESSION_SECRET
 export OPENROUTER_BASE_URL="${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}"
 export OPENROUTER_MODEL="${OPENROUTER_MODEL:-anthropic/claude-haiku-4.5}"
 stop_port_listener() {

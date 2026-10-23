@@ -5,8 +5,31 @@ import RecoveryRecordDialog, { RecoveryField, RecoveryModal } from './RecoveryRe
 import { AIResultValue, reportValue } from './RecoveryReportValue.jsx';
 import './RecoveryUI.css';
 
+export function displayValue(value) {
+  if (value === null || value === undefined) return 'Not provided';
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  if (value === '') return '(empty)';
+  return String(value);
+}
+
+function InsightsPanel({ feature, request }) {
+  const [data, setData] = useState(null), [error, setError] = useState(''), [busy, setBusy] = useState(false);
+  async function load() {
+    setBusy(true); setError('');
+    try { setData(await request(`/api/features/${feature.id}/insights`)); }
+    catch (failure) { setError(failure.message); }
+    finally { setBusy(false); }
+  }
+  return <section className="panel"><div className="moduleTitle"><div><h3>Domain insights</h3><p>Deterministic fallback (no AI provider call) over this register&apos;s own records. Labelled aiGenerated: false.</p></div><button type="button" className="secondary" onClick={load} disabled={busy}>{busy ? 'Checking…' : 'Run insights'}</button></div>
+    {error && <p className="error" role="alert">{error}</p>}
+    {data && <div className="sr-report-sections">{data.insights.map((insight) => <section key={insight.id}><h3>{insight.title} · aiGenerated: false</h3><p>{displayValue(insight.summary)}</p><div className="detailGrid">{insight.metrics.map((metric) => <div key={metric.label}><span>{metric.label}</span><p>{displayValue(metric.value)}</p></div>)}</div>{insight.sections.map((section) => <article key={section.title}><h4>{section.title}</h4><p>{displayValue(section.detail)}</p></article>)}</section>)}</div>}
+    {data?.disclaimer && <small className="disclaimer">{data.disclaimer}</small>}
+  </section>;
+}
+
 export default function RecoveryWorkbench({ app, feature, request, notify }) {
   const [values, setValues] = useState(() => scenario(feature)), [items, setItems] = useState([]), [history, setHistory] = useState([]), [result, setResult] = useState(null), [selected, setSelected] = useState(null), [selectedReport, setSelectedReport] = useState(null), [busy, setBusy] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState(''), [loading, setLoading] = useState(true);
+  const [query, setQuery] = useState(''), [statusFilter, setStatusFilter] = useState(''), [riskFilter, setRiskFilter] = useState('');
   const active = useRef(null), epoch = useRef(0), form = useRef(null);
   const currency = value => new Intl.NumberFormat('en-US', { style: 'currency', currency: app.currency || 'USD', maximumFractionDigits: 2 }).format(Number(value || 0));
   async function refresh(signal, generation = epoch.current) {
@@ -40,11 +63,26 @@ export default function RecoveryWorkbench({ app, feature, request, notify }) {
   async function changed(item, message) { setSelected(item); notify(message); await refresh(); }
   function preset(type) { if (!busy) { setValues(scenario(feature, type)); setNotice('Example fields filled. These values are fictional and do not represent uploaded or verified evidence.'); setError(''); } }
   const canCreate = ['admin', 'operator'].includes(app.user.role);
+  const filtered = items.filter((item) => {
+    if (statusFilter && item.status !== statusFilter) return false;
+    if (riskFilter && item.risk !== riskFilter) return false;
+    const needle = query.trim().toLowerCase();
+    return !needle || [item.reference, item.title, item.status, item.owner, item.risk].join(' ').toLowerCase().includes(needle);
+  });
+  function download(name, text, type) { const url = URL.createObjectURL(new Blob([text], { type })); const link = document.createElement('a'); link.href = url; link.download = name; link.click(); URL.revokeObjectURL(url); }
+  async function exportRecords(format) {
+    try {
+      const params = new URLSearchParams({ format, q: query, status: statusFilter, risk: riskFilter });
+      if (format === 'json') { const data = await request(`/api/features/${feature.id}/records/export?${params}`); download(`${feature.id}-records.json`, JSON.stringify(data, null, 2) + '\n', 'application/json'); }
+      else { const response = await fetch(`/api/features/${feature.id}/records/export?${params}`, { headers: { Authorization: `Bearer ${localStorage.getItem('domain_recovery_token') || ''}` } }); if (!response.ok) throw new Error(`Export failed (${response.status})`); download(`${feature.id}-records.csv`, await response.text(), 'text/csv;charset=utf-8'); }
+    } catch (failure) { setError(failure.message); }
+  }
   return <><header className="pageTitle"><div><span className="eyebrow">{feature.code}</span><h2>{feature.title}</h2><p>{feature.description}</p></div></header><div className="outcome"><strong>Outcome</strong><span>{feature.outcome}</span></div>
     <div className="workbench"><form ref={form} className="panel" onSubmit={create}><div className="moduleTitle"><div><h3>Domain input workbench</h3><p>Fill a complete example, review the inputs, then request a draft with OpenRouter.</p></div></div><fieldset disabled={!!busy} className="recoveryFieldset"><div className="scenarioRow"><button type="button" onClick={() => preset('standard')}>Fill Standard Case</button><button type="button" onClick={() => preset('high')}>Fill High-Risk Case</button><button type="button" onClick={() => preset('exception')}>Fill Exception Case</button><button type="button" onClick={() => { setValues({}); setNotice(''); }}>Clear All Fields</button></div><div className="formGrid">{feature.fields.map(field => <RecoveryField key={field.key} field={field} value={values[field.key]} onChange={value => setValues(current => ({ ...current, [field.key]: value }))} />)}</div></fieldset>
     <div className="buttonRow"><button type="button" className="primary" onClick={() => run('calculate')} disabled={!!busy}>{busy === 'calculate' ? 'Calculating locally…' : feature.calculateLabel}</button><button type="button" className="aiButton" onClick={() => run('analyze')} disabled={!!busy || !app.ai?.configured}>{busy === 'analyze' ? 'Generating with OpenRouter…' : 'Generate with OpenRouter'}</button>{['analyze', 'calculate'].includes(busy) && <button type="button" className="secondary" onClick={cancel}>Cancel</button>}<button type="submit" className="secondary" disabled={!!busy || !canCreate}>{busy === 'create' ? 'Creating…' : 'Create Operational Case'}</button></div>
     {!app.ai?.configured && <p className="muted">OpenRouter is not configured for this workspace. Configure the existing provider connection to generate a report.</p>}{busy === 'analyze' && <p role="status">OpenRouter is reviewing the entered fields. Cancel stops the request and discards any late response.</p>}{notice && <p className="recoveryNotice" role="status">{notice}</p>}{error && <p className="error" role="alert">{error}</p>}<small className="muted">Examples are fictional. Local calculations and AI drafts require source validation and the native approval workflow.</small></form><RecoveryReport result={result} /></div>
-    <section className="panel"><div className="moduleTitle"><div><h3>{feature.registerTitle}</h3><p>Open a case to review its fields and permitted Edit, Delete or workflow actions.</p></div><span className="badge">{items.length} PostgreSQL records</span></div>{loading ? <p role="status">Loading saved records…</p> : items.length ? <div className="tableWrap"><table><thead><tr><th>Reference</th><th>Case</th><th>Status</th><th>Owner</th><th>Risk</th><th>Due</th><th>Value</th></tr></thead><tbody>{items.map(item => <tr key={item.id} tabIndex={0} onClick={() => setSelected(item)} onKeyDown={event => { if (event.target === event.currentTarget && ['Enter', ' '].includes(event.key)) { event.preventDefault(); setSelected(item); } }}><td>{item.reference}</td><td>{item.title}</td><td>{item.status}</td><td>{item.owner}</td><td>{item.risk}</td><td>{String(item.due_date).slice(0, 10)}</td><td>{currency(item.amount)}</td></tr>)}</tbody></table></div> : <p className="muted">No operational cases are saved for this feature.</p>}</section>
+    <section className="panel"><div className="moduleTitle"><div><h3>{feature.registerTitle}</h3><p>Open a case to review its fields and permitted Edit, Delete or workflow actions.</p></div><span className="badge">{filtered.length} of {items.length} records</span></div><div className="buttonRow"><label>Search records<input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Reference, case, owner…" /></label><label>Status<select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}><option value="">All statuses</option><option>Open</option><option>Investigating</option><option>Review</option><option>Approved</option><option>Closed</option></select></label><label>Risk<select value={riskFilter} onChange={(e) => setRiskFilter(e.target.value)}><option value="">All risks</option><option>Low</option><option>Moderate</option><option>High</option><option>Critical</option></select></label><button type="button" className="secondary" onClick={() => exportRecords('csv')}>Export CSV</button><button type="button" className="secondary" onClick={() => exportRecords('json')}>Export JSON</button></div>{loading ? <p role="status">Loading saved records…</p> : filtered.length ? <div className="tableWrap"><table><thead><tr><th>Reference</th><th>Case</th><th>Status</th><th>Owner</th><th>Risk</th><th>Due</th><th>Value</th></tr></thead><tbody>{filtered.map(item => <tr key={item.id} tabIndex={0} onClick={() => setSelected(item)} onKeyDown={event => { if (event.target === event.currentTarget && ['Enter', ' '].includes(event.key)) { event.preventDefault(); setSelected(item); } }}><td>{item.reference}</td><td>{item.title}</td><td>{item.status}</td><td>{item.owner}</td><td>{item.risk}</td><td>{String(item.due_date).slice(0, 10)}</td><td>{currency(item.amount)}</td></tr>)}</tbody></table></div> : <p className="muted">No operational cases are saved for this feature.</p>}</section>
+    <InsightsPanel feature={feature} request={request} />
     <section className="panel"><div className="moduleTitle"><div><h3>Saved AI reports</h3><p>Your completed OpenRouter reports remain attributable and open in a centered view.</p></div><span className="badge">{history.length} retained reports</span></div>{history.length ? <div className="tableWrap"><table><thead><tr><th>Report</th><th>Model</th><th>Created</th></tr></thead><tbody>{history.map(report => <tr key={report.id} tabIndex={0} onClick={() => setSelectedReport(report)} onKeyDown={event => { if (event.target === event.currentTarget && ['Enter', ' '].includes(event.key)) { event.preventDefault(); setSelectedReport(report); } }}><td>{report.result?.headline || report.analysis_type}</td><td>{report.provider} · {report.model}</td><td>{new Date(report.created_at).toLocaleString()}</td></tr>)}</tbody></table></div> : <p className="muted">Generate a report to retain its answer and model provenance here.</p>}</section>
     {selected && <RecoveryRecordDialog key={`${selected.id}:${selected.updated_at || ''}`} request={request} feature={feature} item={selected} onClose={() => setSelected(null)} onChanged={changed} />}
     {selectedReport && <RecoveryModal label="Saved AI report" onClose={() => setSelectedReport(null)}><RecoveryReport result={selectedReport.result} /><p className="muted">This generated analysis is retained as read-only evidence. Create a new report for revised inputs.</p><button type="button" className="secondary" onClick={() => setSelectedReport(null)}>Cancel</button></RecoveryModal>}

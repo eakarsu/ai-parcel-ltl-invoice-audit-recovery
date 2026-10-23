@@ -1,4 +1,5 @@
 import { calculate, normalizeAI, validateInputs, amount, authorizeTransition, localRequest, invalid, openRecoveryPotential } from './recovery-domain.mjs';
+import { mountTasks } from './tasks.mjs';
 import { randomUUID } from 'node:crypto';
 import 'dotenv/config';
 import bcrypt from 'bcryptjs';
@@ -61,17 +62,20 @@ import { mountClaimRoutes } from './claim-routes.mjs';
 import { mountTariffRoutes } from './tariff-routes.mjs';
 import { createRecoveryAnalysisHandler, normalizeRecoveryReport, validateRecoveryFields } from './recoveryAnalysis.mjs';
 import { mountRecoveryRecordActions } from './recoveryRecords.mjs';
+import { mountFeaturePack, filterRecords } from './feature-pack.mjs';
 mountStatementRoutes(app, { pool, config, auth, featureById });
 mountClaimRoutes(app, { pool, auth });
 mountTariffRoutes(app, { pool, auth });
 
+mountFeaturePack(app,{pool,auth,featureById,accountScoped:true,config});
 mountRecoveryRecordActions(app,{pool,auth,featureById,accountScoped:true,validateInputs,authorizeTransition,dependencies:["statement_lines","recovery_claims"]});
+mountTasks(app, { pool, audit, auth });
 app.get('/api/health',async(_req,res)=>{try{await pool.query('SELECT 1');res.json({status:'ok',id:config.id,title:config.title,database:'postgresql',ai:aiStatus()});}catch{res.status(503).json({status:'error',error:'PostgreSQL unavailable'});}});
 app.get('/api/auth/demo-credentials',async(req,res)=>{if(!localRequest(req))return res.status(404).json({error:'Credential fill is available only on this computer'});const password=process.env.DEMO_PASSWORD||'LocalDemo!2026';const rows=(await pool.query("SELECT email,name,role FROM app_users WHERE account_id='local-default' ORDER BY CASE role WHEN 'admin' THEN 1 WHEN 'operator' THEN 2 ELSE 3 END")).rows;res.json({email:rows[0]?.email,password,accounts:rows.map(x=>({...x,password}))});});
 app.post('/api/auth/login',async(req,res)=>{const email=String(req.body.email||'').trim().toLowerCase();const row=(await pool.query('SELECT * FROM app_users WHERE lower(email)=$1',[email])).rows[0];if(!row||!await bcrypt.compare(String(req.body.password||''),row.password_hash))return res.status(401).json({error:'Invalid credentials'});const user={id:row.id,email:row.email,name:row.name,role:row.role,account_id:row.account_id};res.json({token:jwt.sign(user,secret,{expiresIn:'12h',algorithm:'HS256',audience:config.id,issuer:config.id}),user});});
 app.get('/api/app',auth,(req,res)=>res.json({...config,user:req.user,ai:aiStatus()}));
 app.get('/api/dashboard',auth,async(req,res)=>{const totals=(await pool.query(`SELECT count(*)::int records,count(*) FILTER(WHERE status NOT IN ('Approved','Closed'))::int attention FROM feature_records WHERE account_id=$1`,[req.user.account_id])).rows[0];const modules=(await pool.query(`SELECT feature_id,count(*)::int records,count(*) FILTER(WHERE risk IN ('High','Critical'))::int high_risk FROM feature_records WHERE account_id=$1 GROUP BY feature_id`,[req.user.account_id])).rows;const records=(await pool.query(`SELECT feature_id,status,payload FROM feature_records WHERE account_id=$1`,[req.user.account_id])).rows;const confirmed=await supportedTotals(req.user.account_id);const figures=config.features.map(feature=>recoveryFigures(feature,records,confirmed));res.json({totals:{...totals,confirmed_recovery:Number(figures.reduce((sum,item)=>sum+item.confirmed_recovery,0).toFixed(2)),open_potential:Number(figures.reduce((sum,item)=>sum+item.open_potential,0).toFixed(2))},features:config.features.map(f=>({...f,...modules.find(x=>x.feature_id===f.id),...figures.find(x=>x.feature_id===f.id)}))});});
-app.get('/api/features/:id/records',auth,async(req,res)=>{featureById(req.params.id);const rows=(await pool.query('SELECT * FROM feature_records WHERE account_id=$1 AND feature_id=$2 ORDER BY updated_at DESC,id DESC',[req.user.account_id,req.params.id])).rows;res.json({items:rows});});
+app.get('/api/features/:id/records',auth,async(req,res)=>{featureById(req.params.id);const rows=(await pool.query('SELECT * FROM feature_records WHERE account_id=$1 AND feature_id=$2 ORDER BY updated_at DESC,id DESC',[req.user.account_id,req.params.id])).rows;res.json({items:filterRecords(rows,req.query)});});
 app.post('/api/features/:id/records',auth,async(req,res,next)=>{let client;try{client=await pool.connect();
  if(!['admin','operator'].includes(req.user.role))throw invalid('Operator role required',403);
  const feature=featureById(req.params.id),values=validateInputs(feature,req.body.values,true);
